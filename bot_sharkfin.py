@@ -15,16 +15,18 @@ from dataclasses import dataclass, asdict
 from pysdk.grvt_ccxt import GrvtCcxt
 from pysdk.grvt_ccxt_env import GrvtEnv
 from dotenv import load_dotenv
+from atr_dynamic_grid import ATRDynamicGrid, ATRConfig
 
 load_dotenv()
 
-# 設定（BTC/USDT最適パラメータ）
-SYMBOL = "BTC_USDT_Perp"     # BTC/USDT
-GRID_COUNT = 40              # グリッドレベル数（最適: 40）
-GRID_SPACING_PCT = 0.05      # グリッド間隔（最適: 0.05%）
-RANGE_PCT = 1.0              # レンジ幅（最適: 1.0%）
-POSITION_SIZE_USD = 25       # 1レベルあたりのサイズ（$25）
-STOP_LOSS_PCT = 1.5          # ストップロス（レンジ下限から%）
+# 設定（BTC/USDT最適パラメータ + ATR動的調整）
+SYMBOL = "BTC_USDT_Perp"
+GRID_COUNT = 40
+BASE_GRID_SPACING_PCT = 0.05
+BASE_RANGE_PCT = 1.0
+USE_ATR_DYNAMIC = True  # ATR動的調整を有効化
+POSITION_SIZE_USD = 25
+STOP_LOSS_PCT = 1.5
 
 STATE_FILE = "sharkfin_state.json"
 LOG_FILE = "sharkfin.log"
@@ -87,6 +89,9 @@ class SharkfinGridBot:
     def __init__(self):
         self.client = None
         self.state = load_state()
+        self.atr_grid = ATRDynamicGrid() if USE_ATR_DYNAMIC else None
+        self.grid_spacing_pct = BASE_GRID_SPACING_PCT
+        self.range_pct = BASE_RANGE_PCT
 
     async def connect(self):
         try:
@@ -109,9 +114,11 @@ class SharkfinGridBot:
         """グリッドレベルを計算（幾何学的間隔）"""
         levels = []
         
+        spacing_pct = self.grid_spacing_pct  # 動的間隔を使用
+        
         # 下方向（買い）
         for i in range(GRID_COUNT // 2):
-            price = center_price * (1 - GRID_SPACING_PCT / 100) ** (i + 1)
+            price = center_price * (1 - spacing_pct / 100) ** (i + 1)
             levels.append({
                 'price': round(price, 2),
                 'side': 'buy',
@@ -121,7 +128,7 @@ class SharkfinGridBot:
         
         # 上方向（売り）
         for i in range(GRID_COUNT // 2):
-            price = center_price * (1 + GRID_SPACING_PCT / 100) ** (i + 1)
+            price = center_price * (1 + spacing_pct / 100) ** (i + 1)
             levels.append({
                 'price': round(price, 2),
                 'side': 'sell',
@@ -137,10 +144,23 @@ class SharkfinGridBot:
         ticker = self.client.fetch_ticker(SYMBOL)
         center_price = float(ticker['last_price'])
         
+        # ATR動的調整（有効な場合）
+        if self.atr_grid and USE_ATR_DYNAMIC:
+            # OHLCV取得（直近50本）
+            ohlcv = self.client.fetch_ohlcv(SYMBOL, timeframe='5m', limit=50)
+            highs = [c[2] for c in ohlcv]
+            lows = [c[3] for c in ohlcv]
+            closes = [c[4] for c in ohlcv]
+            
+            self.grid_spacing_pct, self.range_pct = self.atr_grid.get_grid_params(highs, lows, closes)
+            
+            atr_status = self.atr_grid.get_status()
+            log(f"ATR Dynamic: {atr_status['volatility_level']}, spacing={self.grid_spacing_pct:.3f}%, range={self.range_pct:.2f}%")
+        
         # レンジ設定
         self.state.range_center = center_price
-        self.state.range_upper = center_price * (1 + RANGE_PCT / 100)
-        self.state.range_lower = center_price * (1 - RANGE_PCT / 100)
+        self.state.range_upper = center_price * (1 + self.range_pct / 100)
+        self.state.range_lower = center_price * (1 - self.range_pct / 100)
         
         # グリッドレベル計算
         self.state.grid_levels = self.calculate_grid_levels(center_price)
