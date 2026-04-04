@@ -1,0 +1,4 @@
+pysdk
+python-dotenv
+numpy
+pandas
