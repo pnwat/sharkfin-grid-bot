@@ -210,12 +210,26 @@ async def check_range_breakout(self, current_price: float) -> bool:
 | パラメータ | デフォルト値 | 説明 |
 |-----------|-------------|------|
 | `SYMBOL` | BTC_USDT_Perp | 取引ペア |
-| `GRID_COUNT` | 40 | グリッドレベル数 |
-| `GRID_SPACING_PCT` | 0.05 | グリッド間隔（%） |
-| `RANGE_PCT` | 1.0 | レンジ幅（%） |
-| `POSITION_SIZE_USD` | 25 | 1レベルあたりのサイズ（$） |
+| `GRID_COUNT` | 40 | グリッドレベル数（GRVT Tier 3相当） |
+| `GRID_SPACING_PCT` | 0.03 | グリッド間隔（%）、狭いほど高回転 |
+| `RANGE_PCT` | 0.5 | レンジ幅（%）、狭いほど集中 |
+| `POSITION_SIZE_USD` | 150 | 1レベルあたりのサイズ（$） |
 | `STOP_LOSS_PCT` | 1.5 | ストップロス（%） |
 | `maker_fee` | 0.0002 | メーカー手数料（%） |
+
+### 6.1 レート制限対応
+
+GRVT APIのレート制限に準拠：
+
+| 操作 | 制限 | 対策 |
+|------|------|------|
+| Create注文 | 260/10秒 | 0.5秒間隔で注文 |
+| GetOrder | 50/10秒 | fetch_open_orders一括取得 |
+| ループ間隔 | - | 10秒 |
+
+**最適化された約定確認：**
+- 個別のfetch_orderではなく、fetch_open_orders（1リクエスト）で全体確認
+- これによりGetOrder制限を回避
 
 ---
 
@@ -283,4 +297,5 @@ python hot_reload.py bot_sharkfin.py
 
 | 日付 | バージョン | 変更内容 |
 |------|----------|---------|
+| 2026-04-04 | 1.1 | レート制限対応、約定確認最適化、パラメータ調整 |
 | 2026-04-04 | 1.0 | 初版 |

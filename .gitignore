@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Logs
+*.log
+
+# State files
+*_state.json
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/

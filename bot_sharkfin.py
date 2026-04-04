@@ -1,31 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-シャークフィン/レンジグリッドボット
-
-指値のみ（LIMIT_MAKER）で運用するグリッドボット
-成行注文は一切使用しない
+シャークフィン/レンジグリッドボット（積極的設定）
 """
 import os
 import json
 import asyncio
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List
 from dataclasses import dataclass, asdict
 
 from pysdk.grvt_ccxt import GrvtCcxt
 from pysdk.grvt_ccxt_env import GrvtEnv
 from dotenv import load_dotenv
-from atr_dynamic_grid import ATRDynamicGrid, ATRConfig
 
 load_dotenv()
 
-# 設定（BTC/USDT最適パラメータ + ATR動的調整）
+# レート制限準拠設定
 SYMBOL = "BTC_USDT_Perp"
-GRID_COUNT = 40
-BASE_GRID_SPACING_PCT = 0.05
-BASE_RANGE_PCT = 1.0
-USE_ATR_DYNAMIC = True  # ATR動的調整を有効化
-POSITION_SIZE_USD = 25
+GRID_COUNT = 40              # Tier 3相当
+GRID_SPACING_PCT = 0.03      # 間隔狭める
+RANGE_PCT = 0.5              # レンジ狭める
+POSITION_SIZE_USD = 150
 STOP_LOSS_PCT = 1.5
 
 STATE_FILE = "sharkfin_state.json"
@@ -42,7 +37,7 @@ class SharkfinState:
     range_upper: float = 0.0
     range_lower: float = 0.0
     grid_levels: List[Dict] = None
-    active_orders: Dict = None  # {price: order_id}
+    active_orders: Dict = None
     position: float = 0.0
     total_pnl: float = 0.0
     trades: int = 0
@@ -84,14 +79,9 @@ def save_state(state: SharkfinState):
 
 
 class SharkfinGridBot:
-    """シャークフィン/レンジグリッドボット"""
-
     def __init__(self):
         self.client = None
         self.state = load_state()
-        self.atr_grid = ATRDynamicGrid() if USE_ATR_DYNAMIC else None
-        self.grid_spacing_pct = BASE_GRID_SPACING_PCT
-        self.range_pct = BASE_RANGE_PCT
 
     async def connect(self):
         try:
@@ -110,76 +100,65 @@ class SharkfinGridBot:
             log(f"Connection error: {e}")
             return False
 
-    def calculate_grid_levels(self, center_price: float) -> List[Dict]:
-        """グリッドレベルを計算（幾何学的間隔）"""
-        levels = []
-        
-        spacing_pct = self.grid_spacing_pct  # 動的間隔を使用
-        
-        # 下方向（買い）
-        for i in range(GRID_COUNT // 2):
-            price = center_price * (1 - spacing_pct / 100) ** (i + 1)
-            levels.append({
-                'price': round(price, 2),
-                'side': 'buy',
-                'size': round(POSITION_SIZE_USD / price, 4),
-                'level': i + 1,
-            })
-        
-        # 上方向（売り）
-        for i in range(GRID_COUNT // 2):
-            price = center_price * (1 + spacing_pct / 100) ** (i + 1)
-            levels.append({
-                'price': round(price, 2),
-                'side': 'sell',
-                'size': round(POSITION_SIZE_USD / price, 4),
-                'level': i + 1,
-            })
-        
-        return sorted(levels, key=lambda x: x['price'])
+    async def cancel_all_orders(self):
+        """全注文キャンセル"""
+        log("Cancelling all orders...")
+        try:
+            orders = self.client.fetch_open_orders()
+            for o in orders:
+                try:
+                    self.client.cancel_order(o.get('order_id'), SYMBOL)
+                    await asyncio.sleep(0.1)  # レート制限対策
+                except:
+                    pass
+            log(f"Cancelled {len(orders)} orders")
+        except Exception as e:
+            log(f"Cancel error: {e}")
 
     async def setup_range(self):
         """レンジ設定"""
-        # 現在価格を取得
         ticker = self.client.fetch_ticker(SYMBOL)
-        center_price = float(ticker['last_price'])
-        
-        # ATR動的調整（有効な場合）
-        if self.atr_grid and USE_ATR_DYNAMIC:
-            # OHLCV取得（直近50本）
-            ohlcv = self.client.fetch_ohlcv(SYMBOL, timeframe='5m', limit=50)
-            highs = [c[2] for c in ohlcv]
-            lows = [c[3] for c in ohlcv]
-            closes = [c[4] for c in ohlcv]
-            
-            self.grid_spacing_pct, self.range_pct = self.atr_grid.get_grid_params(highs, lows, closes)
-            
-            atr_status = self.atr_grid.get_status()
-            log(f"ATR Dynamic: {atr_status['volatility_level']}, spacing={self.grid_spacing_pct:.3f}%, range={self.range_pct:.2f}%")
-        
-        # レンジ設定
-        self.state.range_center = center_price
-        self.state.range_upper = center_price * (1 + self.range_pct / 100)
-        self.state.range_lower = center_price * (1 - self.range_pct / 100)
-        
-        # グリッドレベル計算
-        self.state.grid_levels = self.calculate_grid_levels(center_price)
-        
-        log(f"Range setup: {self.state.range_lower:.2f} - {self.state.range_upper:.2f}")
-        log(f"Center: {center_price:.2f}, Grid levels: {len(self.state.grid_levels)}")
-        
-        save_state(self.state)
+        current_price = float(ticker['last_price'])
+
+        half_range = current_price * (RANGE_PCT / 100 / 2)
+        self.state.range_center = current_price
+        self.state.range_upper = current_price + half_range
+        self.state.range_lower = current_price - half_range
+
+        log(f"Range: ${self.state.range_lower:.0f} - ${self.state.range_upper:.0f}")
+        log(f"Center: ${current_price:.0f}, Spread: {GRID_SPACING_PCT}%")
+
+        # グリッド生成
+        self.state.grid_levels = []
+        for i in range(GRID_COUNT):
+            if i < GRID_COUNT // 2:
+                price = self.state.range_lower + (self.state.range_center - self.state.range_lower) * (i / (GRID_COUNT // 2))
+                side = 'buy'
+            else:
+                price = self.state.range_center + (self.state.range_upper - self.state.range_center) * ((i - GRID_COUNT // 2) / (GRID_COUNT // 2))
+                side = 'sell'
+
+            raw_size = POSITION_SIZE_USD / price
+            size = max(0.001, round(raw_size, 3))
+
+            self.state.grid_levels.append({
+                'price': round(price),
+                'side': side,
+                'size': size,
+                'filled': False
+            })
+
+        log(f"Grid levels: {len(self.state.grid_levels)}")
 
     async def place_grid_orders(self):
-        """グリッド注文を配置（LIMIT_MAKER）"""
-        if not self.state.grid_levels:
-            await self.setup_range()
+        """グリッド注文配置（レート制限対策付き）"""
+        log("Placing grid orders...")
         
-        # 既存注文をキャンセル
-        await self.cancel_all_orders()
-        
-        # 新しい注文を配置
+        placed = 0
         for level in self.state.grid_levels:
+            if level['filled']:
+                continue
+
             try:
                 order = self.client.create_order(
                     symbol=SYMBOL,
@@ -187,130 +166,127 @@ class SharkfinGridBot:
                     side=level['side'],
                     amount=level['size'],
                     price=level['price'],
-                    params={'post_only': True}  # LIMIT_MAKER
+                    params={'post_only': True}
                 )
-                
-                order_id = order.get('id') or order.get('order_id')
-                if order_id:
-                    self.state.active_orders[str(level['price'])] = order_id
-                    log(f"Placed {level['side']} order: {level['size']} @ {level['price']}")
-                
+                order_id = order.get('order_id') or order.get('id')
+                self.state.active_orders[str(level['price'])] = order_id
+                placed += 1
+                await asyncio.sleep(0.5)  # レート制限対策：0.5秒ウェイト
             except Exception as e:
-                log(f"Order error at {level['price']}: {e}")
-        
-        save_state(self.state)
+                log(f"Order error @ ${level['price']}: {e}")
+                await asyncio.sleep(1)  # エラー時は1秒待つ
 
-    async def cancel_all_orders(self):
-        """全注文をキャンセル"""
+        log(f"Placed {placed} orders")
+
+    async def check_fills(self):
+        """約定確認（効率化：fetch_open_orders使用）"""
         try:
-            open_orders = self.client.fetch_open_orders(SYMBOL)
-            for order in open_orders:
-                order_id = order.get('id') or order.get('order_id')
-                if order_id:
-                    self.client.cancel_order(order_id, SYMBOL)
-            
-            self.state.active_orders = {}
-            save_state(self.state)
-            log("Cancelled all orders")
+            # 全オープン注文を一括取得（1リクエストのみ）
+            open_orders = self.client.fetch_open_orders()
+            open_order_ids = {o.get('order_id') for o in open_orders if 'BTC' in str(o.get('legs', [{}])[0].get('instrument', ''))}
         except Exception as e:
-            log(f"Cancel error: {e}")
-
-    async def place_opposite_order(self, filled_side: str, filled_price: float, filled_size: float):
-        """約定後の逆注文を配置"""
-        # 買い約定 → 売り注文
-        # 売り約定 → 買い注文
-        opposite_side = 'sell' if filled_side == 'buy' else 'buy'
-        
-        # 価格はグリッド間隔分ずらす
-        if opposite_side == 'sell':
-            new_price = filled_price * (1 + GRID_SPACING_PCT / 100)
-        else:
-            new_price = filled_price * (1 - GRID_SPACING_PCT / 100)
-        
-        new_price = round(new_price, 2)
-        new_size = round(POSITION_SIZE_USD / new_price, 4)
-        
-        try:
-            order = self.client.create_order(
-                symbol=SYMBOL,
-                order_type='limit',
-                side=opposite_side,
-                amount=new_size,
-                price=new_price,
-                params={'post_only': True}
-            )
-            log(f"Placed opposite order: {opposite_side} {new_size} @ {new_price}")
-        except Exception as e:
-            log(f"Opposite order error: {e}")
-
-    async def place_stop_loss(self):
-        """ストップロス注文（LIMIT）"""
-        if self.state.position <= 0:
+            log(f"Fetch orders error: {e}")
             return
         
-        stop_price = self.state.range_lower * (1 - STOP_LOSS_PCT / 100)
-        stop_price = round(stop_price, 2)
-        
-        try:
-            # ストップロスはLIMIT注文で（成行禁止）
-            self.client.create_order(
-                symbol=SYMBOL,
-                order_type='limit',
-                side='sell',
-                amount=abs(self.state.position),
-                price=stop_price,
-                params={'post_only': False}  # ストップは即座に約定させたい
-            )
-            log(f"Stop loss placed: sell @ {stop_price}")
-        except Exception as e:
-            log(f"Stop loss error: {e}")
+        # 約定した注文を特定
+        for level in self.state.grid_levels[:]:
+            if level['filled']:
+                continue
 
-    async def check_range_breakout(self, current_price: float) -> bool:
-        """レンジブレイクアウト検出"""
-        if current_price > self.state.range_upper:
-            log(f"Range breakout UP: {current_price} > {self.state.range_upper}")
-            return True
-        if current_price < self.state.range_lower:
-            log(f"Range breakout DOWN: {current_price} < {self.state.range_lower}")
+            price_key = str(level['price'])
+            if price_key not in self.state.active_orders:
+                continue
+
+            order_id = self.state.active_orders[price_key]
+            
+            # オープン注文にない = 約定
+            if order_id not in open_order_ids:
+                level['filled'] = True
+                del self.state.active_orders[price_key]
+
+                # 反対注文
+                opposite_side = 'sell' if level['side'] == 'buy' else 'buy'
+                target_price = level['price'] * (1 + GRID_SPACING_PCT / 100) if level['side'] == 'buy' else level['price'] * (1 - GRID_SPACING_PCT / 100)
+
+                try:
+                    self.client.create_order(
+                        symbol=SYMBOL,
+                        order_type='limit',
+                        side=opposite_side,
+                        amount=level['size'],
+                        price=round(target_price),
+                        params={'post_only': True}
+                    )
+                    log(f"FILLED {level['side']} @ ${level['price']:.0f} -> {opposite_side} @ ${target_price:.0f}")
+                    self.state.trades += 1
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    log(f"Opposite order error: {e}")
+
+    async def check_stop_loss(self):
+        """ストップロス"""
+        ticker = self.client.fetch_ticker(SYMBOL)
+        current_price = float(ticker['last_price'])
+
+        stop_price = self.state.range_lower * (1 - STOP_LOSS_PCT / 100)
+
+        if current_price < stop_price:
+            log(f"STOP LOSS @ ${current_price:.0f}")
+            await self.emergency_close()
             return True
         return False
 
-    async def close_position(self, reason: str = ""):
-        """ポジション決済（LIMIT）"""
-        if abs(self.state.position) < 0.001:
-            return
-        
-        ticker = self.client.fetch_ticker(SYMBOL)
-        best_bid = float(ticker['best_bid_price'])
+    async def emergency_close(self):
+        """緊急決済"""
+        log("Emergency close...")
         
         try:
-            side = 'sell' if self.state.position > 0 else 'buy'
-            self.client.create_order(
-                symbol=SYMBOL,
-                order_type='limit',
-                side=side,
-                amount=abs(self.state.position),
-                price=best_bid,
-                params={'post_only': False}
-            )
-            log(f"Closing position: {reason}")
-            self.state.position = 0
-            save_state(self.state)
+            orders = self.client.fetch_open_orders()
+            for o in orders:
+                try:
+                    self.client.cancel_order(o.get('order_id'), SYMBOL)
+                except:
+                    pass
+        except:
+            pass
+
+        try:
+            positions = self.client.fetch_positions()
+            for pos in positions:
+                size = float(pos.get('size', 0))
+                if abs(size) > 0.0001:
+                    side = 'sell' if size > 0 else 'buy'
+                    try:
+                        self.client.create_order(
+                            symbol=SYMBOL,
+                            order_type='market',
+                            side=side,
+                            amount=abs(size)
+                        )
+                        log(f"Emergency closed: {side} {abs(size):.6f}")
+                    except Exception as e:
+                        log(f"Emergency close error: {e}")
         except Exception as e:
-            log(f"Close error: {e}")
+            log(f"Position fetch error: {e}")
+
+        self.state.running = False
+        save_state(self.state)
 
     async def run(self):
         """メインループ"""
-        log("Sharkfin Grid Bot started")
-        log(f"  Symbol: {SYMBOL}")
-        log(f"  Grid count: {GRID_COUNT}")
-        log(f"  Grid spacing: {GRID_SPACING_PCT}%")
-        log(f"  Range: {RANGE_PCT}%")
+        log("=== Sharkfin Bot (Aggressive) ===")
+        log(f"Symbol: {SYMBOL}")
+        log(f"Grid: {GRID_COUNT} levels, {GRID_SPACING_PCT}% spacing")
+        log(f"Range: {RANGE_PCT}%")
 
         if not await self.connect():
             return
 
-        # 初回セットアップ
+        # 既存注文キャンセル
+        await self.cancel_all_orders()
+        await asyncio.sleep(2)
+
+        # レンジ設定＆注文配置
         await self.setup_range()
         await self.place_grid_orders()
 
@@ -326,28 +302,25 @@ class SharkfinGridBot:
                 ticker = self.client.fetch_ticker(SYMBOL)
                 current_price = float(ticker['last_price'])
 
-                # 定期ログ（5分ごと）
-                if loop_count % 300 == 0:
-                    log(f"Price: {current_price:.2f} | Range: {self.state.range_lower:.2f} - {self.state.range_upper:.2f} | Position: {self.state.position:.4f}")
+                # 定期ログ（10分ごと）
+                if loop_count % 60 == 0:  # 10秒 * 60 = 10分
+                    log(f"Price: ${current_price:.0f} | Range: ${self.state.range_lower:.0f}-${self.state.range_upper:.0f} | Trades: {self.state.trades}")
 
-                # レンジブレイクアウトチェック
-                if await self.check_range_breakout(current_price):
-                    await self.close_position("Range breakout")
-                    # 新しいレンジに再設定
-                    await self.setup_range()
-                    await self.place_grid_orders()
+                # 約定確認
+                await self.check_fills()
 
-                # ポジション更新（簡易版）
-                positions = self.client.fetch_positions()
-                for pos in positions:
-                    if pos.get('instrument') == SYMBOL:
-                        self.state.position = float(pos.get('size', 0))
+                # ストップロス
+                if await self.check_stop_loss():
+                    break
 
-                await asyncio.sleep(10)
+                # 状態保存（1分ごと）
+                if loop_count % 6 == 0:  # 10秒 * 6 = 1分
+                    save_state(self.state)
 
             except Exception as e:
                 log(f"Loop error: {e}")
-                await asyncio.sleep(30)
+
+            await asyncio.sleep(10)  # レート制限対策：10秒間隔
 
         log("Bot stopped")
 
