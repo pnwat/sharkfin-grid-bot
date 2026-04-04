@@ -236,6 +236,27 @@ class SharkfinGridBot:
             return True
         return False
 
+    async def close_all_positions(self):
+        """全ポジション決済（レンジ追従用）"""
+        try:
+            positions = self.client.fetch_positions()
+            for pos in positions:
+                size = float(pos.get('size', 0))
+                if abs(size) > 0.0001 and 'BTC' in pos.get('instrument', ''):
+                    side = 'sell' if size > 0 else 'buy'
+                    try:
+                        self.client.create_order(
+                            symbol=SYMBOL,
+                            order_type='market',
+                            side=side,
+                            amount=abs(size)
+                        )
+                        log(f"Closed position: {side} {abs(size):.6f}")
+                    except Exception as e:
+                        log(f"Close error: {e}")
+        except Exception as e:
+            log(f"Position fetch error: {e}")
+
     async def emergency_close(self):
         """緊急決済"""
         log("Emergency close...")
@@ -305,6 +326,23 @@ class SharkfinGridBot:
                 # 定期ログ（10分ごと）
                 if loop_count % 60 == 0:  # 10秒 * 60 = 10分
                     log(f"Price: ${current_price:.0f} | Range: ${self.state.range_lower:.0f}-${self.state.range_upper:.0f} | Trades: {self.state.trades}")
+
+                # レンジ追従：価格がレンジ外に出たら再設定
+                if current_price > self.state.range_upper or current_price < self.state.range_lower:
+                    log(f"Range breakout! Price ${current_price:.0f} outside range")
+                    
+                    # 全ポジション決済
+                    await self.close_all_positions()
+                    
+                    # 注文キャンセル
+                    await self.cancel_all_orders()
+                    await asyncio.sleep(2)
+                    
+                    # 新しいレンジ設定
+                    await self.setup_range()
+                    await self.place_grid_orders()
+                    log(f"New range: ${self.state.range_lower:.0f}-${self.state.range_upper:.0f}")
+                    continue
 
                 # 約定確認
                 await self.check_fills()
