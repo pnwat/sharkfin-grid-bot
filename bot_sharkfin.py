@@ -224,7 +224,7 @@ class SharkfinGridBot:
                     log(f"Opposite order error: {e}")
 
     async def check_stop_loss(self):
-        """ストップロス"""
+        """ストップロス（発動後は待機して再起動）"""
         ticker = self.client.fetch_ticker(SYMBOL)
         current_price = float(ticker['last_price'])
 
@@ -233,8 +233,17 @@ class SharkfinGridBot:
         if current_price < stop_price:
             log(f"STOP LOSS @ ${current_price:.0f}")
             await self.emergency_close()
-            return True
-        return False
+            
+            # 5分待機してから再起動
+            log("Waiting 5 minutes before restart...")
+            await asyncio.sleep(300)
+            
+            # 新しいレンジで再開
+            await self.setup_range()
+            await self.place_grid_orders()
+            log(f"Restarted with new range: ${self.state.range_lower:.0f}-${self.state.range_upper:.0f}")
+            
+        return False  # 継続
 
     async def close_all_positions(self):
         """全ポジション決済（レンジ追従用）"""
@@ -290,8 +299,8 @@ class SharkfinGridBot:
         except Exception as e:
             log(f"Position fetch error: {e}")
 
-        self.state.running = False
-        save_state(self.state)
+        # ボットは停止しない（再起動可能にする）
+        log("Emergency close completed, ready to restart")
 
     async def run(self):
         """メインループ"""
