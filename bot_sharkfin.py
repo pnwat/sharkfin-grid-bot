@@ -8,6 +8,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Dict, List
 from dataclasses import dataclass, asdict
+from pathlib import Path
 
 from pysdk.grvt_ccxt import GrvtCcxt
 from pysdk.grvt_ccxt_env import GrvtEnv
@@ -15,13 +16,27 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# 設定ファイルから読み込み
+def load_config():
+    """Load config from bot_config.json"""
+    config_file = Path(__file__).parent / "bot_config.json"
+    if config_file.exists():
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+_config = load_config()
+
 # レート制限準拠設定
 SYMBOL = "BTC_USDT_Perp"
-GRID_COUNT = 40              # Tier 3相当
-GRID_SPACING_PCT = 0.03      # 間隔狭める
-RANGE_PCT = 0.5              # レンジ狭める
-POSITION_SIZE_USD = 150
-STOP_LOSS_PCT = 1.5
+GRID_COUNT = _config.get("levels", 40)
+GRID_SPACING_PCT = _config.get("spacing", 0.03)
+RANGE_PCT = _config.get("range_width", 0.5)
+POSITION_SIZE_USD = _config.get("position_size", 150)
+STOP_LOSS_PCT = _config.get("stop_loss", 1.5)
 
 STATE_FILE = "sharkfin_state.json"
 LOG_FILE = "sharkfin.log"
@@ -171,10 +186,10 @@ class SharkfinGridBot:
                 order_id = order.get('order_id') or order.get('id')
                 self.state.active_orders[str(level['price'])] = order_id
                 placed += 1
-                await asyncio.sleep(0.5)  # レート制限対策：0.5秒ウェイト
+                await asyncio.sleep(1.0)  # レート制限対策：1秒ウェイト
             except Exception as e:
                 log(f"Order error @ ${level['price']}: {e}")
-                await asyncio.sleep(1)  # エラー時は1秒待つ
+                await asyncio.sleep(2)  # エラー時は2秒待つ
 
         log(f"Placed {placed} orders")
 
@@ -233,9 +248,10 @@ class SharkfinGridBot:
                     )
                     log(f"FILLED {level['side']} @ ${level['price']:.0f} -> {opposite_side} @ ${target_price:.0f}")
                     self.state.trades += 1
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1.0)
                 except Exception as e:
                     log(f"Opposite order error: {e}")
+                    await asyncio.sleep(2)
 
     async def check_stop_loss(self):
         """ストップロス（発動後は待機して再起動）"""
