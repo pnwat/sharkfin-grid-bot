@@ -204,9 +204,19 @@ class SharkfinGridBot:
                 level['filled'] = True
                 del self.state.active_orders[price_key]
 
-                # 反対注文
+                # 反対注文（post_onlyなし = 即約定可能）
                 opposite_side = 'sell' if level['side'] == 'buy' else 'buy'
-                target_price = level['price'] * (1 + GRID_SPACING_PCT / 100) if level['side'] == 'buy' else level['price'] * (1 - GRID_SPACING_PCT / 100)
+                
+                # 市場価格を確認して、有利な価格に調整
+                ticker = self.client.fetch_ticker(SYMBOL)
+                current_price = float(ticker['last_price'])
+                
+                if level['side'] == 'buy':
+                    # 買い約定 → 売り注文は市場価格より上に
+                    target_price = max(level['price'] * (1 + GRID_SPACING_PCT / 100), current_price + 1)
+                else:
+                    # 売り約定 → 買い注文は市場価格より下に
+                    target_price = min(level['price'] * (1 - GRID_SPACING_PCT / 100), current_price - 1)
 
                 try:
                     self.client.create_order(
@@ -214,8 +224,8 @@ class SharkfinGridBot:
                         order_type='limit',
                         side=opposite_side,
                         amount=level['size'],
-                        price=round(target_price),
-                        params={'post_only': True}
+                        price=round(target_price)
+                        # post_onlyなし = 即約定可能
                     )
                     log(f"FILLED {level['side']} @ ${level['price']:.0f} -> {opposite_side} @ ${target_price:.0f}")
                     self.state.trades += 1
