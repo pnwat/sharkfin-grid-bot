@@ -204,19 +204,23 @@ class SharkfinGridBot:
                 level['filled'] = True
                 del self.state.active_orders[price_key]
 
-                # 反対注文（post_onlyなし = 即約定可能）
+                # 反対注文（メーカー注文で決済）
                 opposite_side = 'sell' if level['side'] == 'buy' else 'buy'
                 
-                # 市場価格を確認して、有利な価格に調整
+                # メーカー注文のため、市場価格より有利な価格に設定
                 ticker = self.client.fetch_ticker(SYMBOL)
-                current_price = float(ticker['last_price'])
+                best_bid = float(ticker.get('best_bid_price', 0))
+                best_ask = float(ticker.get('best_ask_price', 0))
                 
                 if level['side'] == 'buy':
-                    # 買い約定 → 売り注文は市場価格より上に
-                    target_price = max(level['price'] * (1 + GRID_SPACING_PCT / 100), current_price + 1)
+                    # 買い約定 → 売り注文はAsk価格以上に
+                    # 利確幅（0.03%）を確保しつつ、Askより上に設定
+                    min_sell_price = level['price'] * (1 + GRID_SPACING_PCT / 100)
+                    target_price = max(min_sell_price, best_ask)
                 else:
-                    # 売り約定 → 買い注文は市場価格より下に
-                    target_price = min(level['price'] * (1 - GRID_SPACING_PCT / 100), current_price - 1)
+                    # 売り約定 → 買い注文はBid価格以下に
+                    max_buy_price = level['price'] * (1 - GRID_SPACING_PCT / 100)
+                    target_price = min(max_buy_price, best_bid)
 
                 try:
                     self.client.create_order(
@@ -224,8 +228,8 @@ class SharkfinGridBot:
                         order_type='limit',
                         side=opposite_side,
                         amount=level['size'],
-                        price=round(target_price)
-                        # post_onlyなし = 即約定可能
+                        price=round(target_price),
+                        params={'post_only': True}  # メーカー注文
                     )
                     log(f"FILLED {level['side']} @ ${level['price']:.0f} -> {opposite_side} @ ${target_price:.0f}")
                     self.state.trades += 1
