@@ -198,7 +198,14 @@ class SharkfinGridBot:
         try:
             # 全オープン注文を一括取得（1リクエストのみ）
             open_orders = self.client.fetch_open_orders()
-            open_order_ids = {o.get('order_id') for o in open_orders if 'BTC' in str(o.get('legs', [{}])[0].get('instrument', ''))}
+            # BTC関連の注文のみ抽出（価格はlegs[0]['limit_price']にある）
+            open_order_prices = set()
+            for o in open_orders:
+                legs = o.get('legs', [])
+                if legs:
+                    price = legs[0].get('limit_price')
+                    if price:
+                        open_order_prices.add(int(float(price)))
         except Exception as e:
             log(f"Fetch orders error: {e}")
             return
@@ -211,11 +218,10 @@ class SharkfinGridBot:
             price_key = str(level['price'])
             if price_key not in self.state.active_orders:
                 continue
-
-            order_id = self.state.active_orders[price_key]
             
-            # オープン注文にない = 約定
-            if order_id not in open_order_ids:
+            # 価格ベースで約定判定（order_id 0x00問題を回避）
+            # オープン注文にその価格の注文がない = 約定
+            if int(level['price']) not in open_order_prices:
                 level['filled'] = True
                 del self.state.active_orders[price_key]
 
@@ -227,15 +233,19 @@ class SharkfinGridBot:
                 best_bid = float(ticker.get('best_bid_price', 0))
                 best_ask = float(ticker.get('best_ask_price', 0))
                 
+                # メーカー注文が約定しないよう、価格にバッファを追加
+                TICK_BUFFER = 1.0  # $1バッファ
+                
                 if level['side'] == 'buy':
-                    # 買い約定 → 売り注文はAsk価格以上に
-                    # 利確幅（0.03%）を確保しつつ、Askより上に設定
+                    # 買い約定 → 売り注文はAskより上に設定
                     min_sell_price = level['price'] * (1 + GRID_SPACING_PCT / 100)
-                    target_price = max(min_sell_price, best_ask)
+                    # Ask価格より上に設定（メーカー注文を保証）
+                    target_price = max(min_sell_price, best_ask + TICK_BUFFER)
                 else:
-                    # 売り約定 → 買い注文はBid価格以下に
+                    # 売り約定 → 買い注文はBidより下に設定
                     max_buy_price = level['price'] * (1 - GRID_SPACING_PCT / 100)
-                    target_price = min(max_buy_price, best_bid)
+                    # Bid価格より下に設定（メーカー注文を保証）
+                    target_price = min(max_buy_price, best_bid - TICK_BUFFER)
 
                 try:
                     self.client.create_order(

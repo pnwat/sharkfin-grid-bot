@@ -38,6 +38,18 @@ def load_state():
     return {"running": False}
 
 
+def load_config():
+    """Load config"""
+    config_file = BASE_DIR / "bot_config.json"
+    if config_file.exists():
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return {"spacing": 0.03, "levels": 40, "range_width": 0.5, "position_size": 150, "stop_loss": 1.5}
+
+
 def save_state(state: dict):
     """Save bot state"""
     with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -61,6 +73,7 @@ async def dashboard():
     """Main dashboard page"""
     state = load_state()
     logs = get_log_lines(30)
+    config = load_config()
     
     html = f"""
 <!DOCTYPE html>
@@ -252,23 +265,23 @@ async def dashboard():
                 <h2>⚙️ Parameters</h2>
                 <div class="param-group">
                     <label>Grid Spacing (%)</label>
-                    <input type="number" id="spacing" value="0.03" step="0.01" min="0.01" max="1.0">
+                    <input type="number" id="spacing" value="{config.get('spacing', 0.03)}" step="0.01" min="0.01" max="1.0">
                 </div>
                 <div class="param-group">
                     <label>Grid Levels</label>
-                    <input type="number" id="levels" value="40" min="10" max="100">
+                    <input type="number" id="levels" value="{config.get('levels', 40)}" min="10" max="100">
                 </div>
                 <div class="param-group">
                     <label>Range Width (%)</label>
-                    <input type="number" id="range_width" value="0.5" step="0.1" min="0.5" max="5.0">
+                    <input type="number" id="range_width" value="{config.get('range_width', 0.5)}" step="0.1" min="0.5" max="5.0">
                 </div>
                 <div class="param-group">
                     <label>Position Size (USD)</label>
-                    <input type="number" id="position_size" value="150" min="50" max="1000">
+                    <input type="number" id="position_size" value="{config.get('position_size', 150)}" min="50" max="1000">
                 </div>
                 <div class="param-group">
                     <label>Stop Loss (%)</label>
-                    <input type="number" id="stop_loss" value="1.5" step="0.1" min="0.5" max="5.0">
+                    <input type="number" id="stop_loss" value="{config.get('stop_loss', 1.5)}" step="0.1" min="0.5" max="5.0">
                 </div>
                 <div class="controls">
                     <button class="btn-save" onclick="saveParams()">💾 Save</button>
