@@ -194,6 +194,11 @@ class TrendGridBot:
         self.state.sma_fast = sma_fast
         self.state.sma_slow = sma_slow
         
+        # デバッグログ
+        if len(self.close_history) > 0:
+            log(f"Close history sample: first={self.close_history[0]:.2f}, last={self.close_history[-1]:.2f}")
+        log(f"SMA calculation: history_len={len(self.close_history)}, SMA{SMA_FAST}={sma_fast:.2f}, SMA{SMA_SLOW}={sma_slow:.2f}")
+        
         if sma_fast > sma_slow:
             return "BULLISH"
         elif sma_fast < sma_slow:
@@ -290,6 +295,12 @@ class TrendGridBot:
             
             price = level['price']
             size = level['size']
+            
+            # DRY RUN: 注文せずにログのみ
+            if self.dry_run:
+                log(f"[DRY] BUY order @ ${price:.2f} ({size:.6f} BTC)")
+                placed += 1
+                continue
             
             try:
                 # メーカー注文（best_bid - $1）
@@ -486,7 +497,18 @@ class TrendGridBot:
             else:
                 candles = response
             
-            for candle in candles[-50:] if len(candles) > 50 else candles:
+            # 履歴をクリアして再構築（重複防止）
+            self.close_history = []
+            self.high_history = []
+            self.low_history = []
+            
+            # GRVT APIは降順（新しい順）で返す
+            # 最新50本を使用（先頭から50個）、その後昇順（古い順）に並べ替え
+            recent_candles = candles[:50] if len(candles) >= 50 else candles
+            # 昇順に並べ替え（古い順）- SMA計算のため
+            recent_candles = list(reversed(recent_candles))
+            
+            for candle in recent_candles:
                 # GRVT形式: {'open': '68364.0', 'high': '68400.0', 'low': '68326.0', 'close': '68326.1', ...}
                 if isinstance(candle, dict):
                     self.close_history.append(float(candle['close']))
@@ -497,11 +519,6 @@ class TrendGridBot:
                     self.close_history.append(float(candle[4]))
                     self.high_history.append(float(candle[2]))
                     self.low_history.append(float(candle[3]))
-            
-            # 最新100本に制限
-            self.close_history = self.close_history[-100:]
-            self.high_history = self.high_history[-100:]
-            self.low_history = self.low_history[-100:]
             
             # 現在価格
             ticker = self.client.fetch_ticker(SYMBOL)
