@@ -331,6 +331,10 @@ class TrendGridBot:
 
     async def check_fills(self):
         """約定確認"""
+        # DRY RUN: 注文確認をスキップ
+        if self.dry_run:
+            return
+        
         try:
             open_orders = self.client.fetch_open_orders()
             open_prices = set()
